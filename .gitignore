@@ -1,0 +1,62 @@
+# Naver session & credentials
+naver_storage.json
+naver_state.json
+se_auth_token.txt
+contact_image_*.json
+sessions/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+*.egg-info/
+
+# DB files
+*.db
+*.sqlite
+
+# Screenshots & test images
+*.png
+*.jpg
+*.jpeg
+*.gif
+test_images/
+image_cache/
+
+# Captured payloads
+captured_*.json
+content_json_capture.json
+editor_api_full.json
+network_capture.json
+header_capture.json
+captured_article_payload.json
+
+# Temporary & output files
+tmp/
+temp/
+*.log
+*.tmp
+output/
+
+# Session & state files
+*.state.json
+
+# macOS
+.DS_Store
+
+# Experimental / one-off test scripts
+test_*.py
+temp_*.py
+debug_*.py
+find_*.py
+correct_*.py
+full_menus.py
+menu_info.py
+check_data.py
+cleanup_images.py
+migrate_db.py
