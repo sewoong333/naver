@@ -1,9 +1,6 @@
-# Naver session & credentials
-naver_storage.json
-naver_state.json
-se_auth_token.txt
-contact_image_*.json
-sessions/
+# Naver session & credentials (세션파일은 리포지토리 포함)
+# naver_storage.json — intentionally tracked for portability
+# naver_state.json — intentionally tracked for portability
 
 # Python cache
 __pycache__/
@@ -16,9 +13,8 @@ venv/
 .venv/
 *.egg-info/
 
-# DB files
-*.db
-*.sqlite
+# DB files (DB는 리포지토리 포함)
+# *.db — intentionally tracked for portability
 
 # Screenshots & test images
 *.png
@@ -27,6 +23,8 @@ venv/
 *.gif
 test_images/
 image_cache/
+# But keep info article images tracked
+!image_cache/info/
 
 # Captured payloads
 captured_*.json
@@ -44,7 +42,7 @@ temp/
 output/
 
 # Session & state files
-*.state.json
+# *.state.json — intentionally tracked
 
 # macOS
 .DS_Store
