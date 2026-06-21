@@ -37,6 +37,11 @@ INFO_TOPICS = [
              "중고로 구매하면 더 합리적인 가격에 좋은 악기를 구할 수 있어요!",
              True),
         ],
+        "section_images": {
+            0: ["gtr_acoustic_top.jpg", "stock_acoustic.jpg"],
+            1: ["gtr_acoustic_old.jpg", "stock_guitarist.jpg"],
+            2: ["electric.jpg", "concert.jpg"],
+        },
         "hashtags": "#통기타 #통기타입문 #입문용기타 #어쿠스틱기타 #기타추천 #중고악기 #에코뮤직"
     },
     {
@@ -61,6 +66,11 @@ INFO_TOPICS = [
              "입문용이라면 10~30만원대 중고 바이올린으로 시작해도 충분합니다!",
              True),
         ],
+        "section_images": {
+            0: ["stock_band.jpg", "music2.jpg"],
+            1: ["stock_studio.jpg", "concert_crowd.jpg"],
+            2: ["stock_vinyl.jpg", "record_vinyl.jpg"],
+        },
         "hashtags": "#바이올린 #바이올린사이즈 #클래식악기 #현악기 #입문바이올린 #중고악기 #에코뮤직"
     },
     {
@@ -85,6 +95,11 @@ INFO_TOPICS = [
              "• 피크: 0.7~1.0mm 사이, 여러 두께로 준비",
              True),
         ],
+        "section_images": {
+            0: ["gtr_electric_red.jpg", "stock_guitarist.jpg"],
+            1: ["electric.jpg", "gtr_playing.jpg"],
+            2: ["studio_mic.jpg", "concert.jpg"],
+        },
         "hashtags": "#일렉기타 #일렉기타입문 #일렉기타추천 #일렉입문 #기타추천 #중고악기 #에코뮤직"
     },
     {
@@ -116,6 +131,11 @@ INFO_TOPICS = [
              "에코뮤직 중고악기백화점은 직접 방문해 다양한 악기를 비교 체험할 수 있어요!",
              True),
         ],
+        "section_images": {
+            0: ["stock_studio.jpg", "stock_band.jpg"],
+            1: ["stock_vinyl.jpg", "music1.jpg"],
+            2: ["music2.jpg", "band_live.jpg"],
+        },
         "hashtags": "#중고악기 #중고악기구매 #중고악기팁 #악기거래 #중고거래 #에코뮤직 #중고악기백화점"
     },
     {
@@ -139,6 +159,11 @@ INFO_TOPICS = [
              "5. 이어플러그 - 청력 보호 필수!",
              True),
         ],
+        "section_images": {
+            0: ["stock_drummer.jpg", "band_bw.jpg"],
+            1: ["drum_acoustic.jpg", "drum_electric.jpg"],
+            2: ["drum_perc.jpg", "drums2.jpg"],
+        },
         "hashtags": "#드럼 #드럼입문 #전자드럼 #어쿠스틱드럼 #드럼추천 #중고악기 #에코뮤직"
     },
     {
@@ -172,6 +197,11 @@ INFO_TOPICS = [
              "에코뮤직 중고악기백화점에는 세 종류 모두 준비되어 있습니다!",
              True),
         ],
+        "section_images": {
+            0: ["kb_keyboard.jpg", "keyboard.jpg"],
+            1: ["kb_synth.jpg", "synth.jpg"],
+            2: ["piano_grand.jpg", "piano2.jpg", "piano3.jpg"],
+        },
         "hashtags": "#키보드 #신디사이저 #디지털피아노 #건반악기 #전자악기 #입문추천 #중고악기 #에코뮤직"
     },
     {
@@ -209,6 +239,11 @@ INFO_TOPICS = [
              "이 모든 관리 용품은 에코뮤직에서 구매 가능합니다!",
              True),
         ],
+        "section_images": {
+            0: ["stock_piano.jpg", "record_vinyl.jpg"],
+            1: ["stock_studio.jpg", "music1.jpg"],
+            2: ["stock_vinyl.jpg", "piano_hands.jpg"],
+        },
         "hashtags": "#악기관리 #악기보관 #통기타관리 #바이올린관리 #악기팁 #중고악기 #에코뮤직"
     },
     {
@@ -243,6 +278,11 @@ INFO_TOPICS = [
              "처음부터 비싼 기타는 NO! 중고로 시작해서 실력 키우고 업그레이드 하세요 🎸",
              True),
         ],
+        "section_images": {
+            0: ["stock_acoustic.jpg", "gtr_acoustic_top.jpg"],
+            1: ["gtr_acoustic_old.jpg", "stock_guitarist.jpg"],
+            2: ["electric.jpg", "band_live.jpg"],
+        },
         "hashtags": "#통기타 #어쿠스틱기타 #통기타추천 #입문기타 #기타고르는법 #중고악기 #에코뮤직"
     },
 ]
@@ -267,21 +307,45 @@ def get_random_topic():
     return t
 
 
-def get_cached_images(keyword, max_count=4):
-    """로컬 캐시에서 주제별 이미지 파일 경로 목록 반환"""
-    fnames = TOPIC_IMAGES.get(keyword, [])
-    if not fnames:
-        import glob
-        fnames = [os.path.basename(f) for f in sorted(glob.glob(os.path.join(IMAGE_CACHE_DIR, '*.jpg')))]
-    valid = []
-    for fn in fnames[:max_count]:
-        fp = os.path.join(IMAGE_CACHE_DIR, fn)
-        if os.path.exists(fp) and os.path.getsize(fp) > 2000:
-            valid.append(fp)
-    log(f'📸 로컬 캐시 이미지: {len(valid)}개 (주제: {keyword})')
-    for v in valid:
+def get_cached_images(topic, section_idx=None, max_per_section=2):
+    """로컬 캐시에서 주제/섹션별 이미지 파일 경로 목록 반환
+    - section_idx=None: 섹션별로 전부 수집 (최대 6장)
+    - section_idx=N: 특정 섹션만 (1~2장)
+    """
+    keyword = topic['keyword']
+    section_images = topic.get('section_images', {})
+    all_valid = []
+
+    if section_idx is not None:
+        # 특정 섹션 이미지만
+        fnames = section_images.get(section_idx, [])
+        for fn in fnames[:max_per_section]:
+            fp = os.path.join(IMAGE_CACHE_DIR, fn)
+            if os.path.exists(fp) and os.path.getsize(fp) > 2000:
+                all_valid.append(fp)
+    else:
+        # 모든 섹션 이미지 수집
+        for idx in sorted(section_images.keys()):
+            fnames = section_images.get(idx, [])
+            for fn in fnames[:max_per_section]:
+                fp = os.path.join(IMAGE_CACHE_DIR, fn)
+                if os.path.exists(fp) and os.path.getsize(fp) > 2000:
+                    all_valid.append(fp)
+        # fallback: section_images 없으면 TOPIC_IMAGES
+        if not all_valid:
+            for fn in TOPIC_IMAGES.get(keyword, [])[:4]:
+                fp = os.path.join(IMAGE_CACHE_DIR, fn)
+                if os.path.exists(fp) and os.path.getsize(fp) > 2000:
+                    all_valid.append(fp)
+        if not all_valid:
+            import glob
+            for fp in sorted(glob.glob(os.path.join(IMAGE_CACHE_DIR, '*.jpg')))[:4]:
+                all_valid.append(fp)
+
+    log(f'📸 이미지: {len(all_valid)}개 (섹션{section_idx if section_idx is not None else "전체"}: {keyword})')
+    for v in all_valid:
         log(f'  • {os.path.basename(v)}')
-    return valid
+    return all_valid
 
 
 def make_text_comp(text):
@@ -341,10 +405,10 @@ def make_info_article_layout(topic, image_count):
     return json.dumps(doc, ensure_ascii=False)
 
 
-def rebuild_with_layout(doc_json, topic, image_paths):
+def rebuild_with_layout(doc_json, topic, section_image_map):
     """
-    SE3 문서 재구성: 이미지 컴포넌트 보존 + 텍스트 내용 교체
-    레이아웃: 인트로 → [이미지들] → 섹션들 → 마무리
+    SE3 문서 재구성: 섹션별 이미지 컴포넌트 보존 + 텍스트 내용 교체
+    레이아웃: 인트로 → [섹션0 이미지] → 섹션1 본문 → [섹션1 이미지] → 섹션2 본문 → [섹션2 이미지] → 섹션3 본문 → 마무리
     """
     keyword = topic['keyword']
     title = topic['title_prefix']
@@ -360,24 +424,24 @@ def rebuild_with_layout(doc_json, topic, image_paths):
     intro = f'{title}\n\n에코뮤직 중고악기백화점입니다! 🙌\n\n오늘은 "{keyword}"에 대해 알려드릴게요.\n꼼꼼히 읽어보시고 악기 선택에 도움되세요 😊'
     new_comps.append(make_text_comp(intro))
 
-    # 이미지들 (처음 2장은 인트로 뒤에)
-    for img in image_comps[:2]:
-        new_comps.append(img)
-
-    # 섹션들
+    # 섹션들 + 섹션별 이미지
+    img_idx = 0
     for i, section in enumerate(sections):
         if len(section) >= 3:
             heading, body = section[0], section[1]
         else:
             heading, body = section
+
+        # 이 섹션의 본문
         st = f'📌 {heading}\n\n{body}'
         new_comps.append(make_text_comp(st))
 
-        # 섹션 사이에 이미지 추가 (있다면)
-        if i == 0 and len(image_comps) > 2:
-            new_comps.append(image_comps[2])
-        elif i == 1 and len(image_comps) > 3:
-            new_comps.append(image_comps[3])
+        # 이 섹션의 이미지 추가
+        section_imgs = section_image_map.get(i, [])
+        for _ in section_imgs:
+            if img_idx < len(image_comps):
+                new_comps.append(image_comps[img_idx])
+                img_idx += 1
 
         if i < len(sections) - 1:
             new_comps.append(make_text_comp('\n━━━━━━━━━━━━━━━━━━━━━━\n'))
@@ -392,11 +456,12 @@ def rebuild_with_layout(doc_json, topic, image_paths):
     new_comps.append(make_text_comp(closing))
 
     # 남은 이미지
-    for img in image_comps[4:]:
+    for img in image_comps[img_idx:]:
         new_comps.append(img)
 
     se3['document']['components'] = new_comps
-    log(f'📝 레이아웃 재구성: 인트로+이미지({len(image_comps)}장)+섹션+마무리')
+    total_imgs = img_idx
+    log(f'📝 레이아웃: 인트로+{len(sections)}개섹션({total_imgs}장이미지)+마무리')
     return json.dumps(se3, ensure_ascii=False)
 
 
@@ -412,9 +477,15 @@ def publish_info_article(topic=None):
     log(f'📝 주제: {keyword}')
     log(f'📰 제목: {title}')
 
-    # ── 로컬 이미지 ──
-    local_images = get_cached_images(keyword, max_count=4)
-    log(f'📸 사용할 이미지: {len(local_images)}개')
+    # ── 섹션별 이미지 수집 ──
+    section_image_map = {}
+    all_local_images = []
+    for i in range(len(topic.get('sections', []))):
+        sec_imgs = get_cached_images(topic, section_idx=i, max_per_section=2)
+        if sec_imgs:
+            section_image_map[i] = sec_imgs
+            all_local_images.extend(sec_imgs)
+    log(f'📸 총 이미지: {len(all_local_images)}개 ({len(section_image_map)}개 섹션)')
 
     # ── Playwright + REST API ──
     STORAGE_FILE = os.path.join(BASE_DIR, 'naver_storage.json')
@@ -457,9 +528,9 @@ def publish_info_article(topic=None):
             time.sleep(2)
 
             # ── 이미지 업로드 ──
-            if local_images:
-                for idx, img_path in enumerate(local_images):
-                    log(f'  📸 [{idx+1}/{len(local_images)}] 업로드 중...')
+            if all_local_images:
+                for idx, img_path in enumerate(all_local_images):
+                    log(f'  📸 [{idx+1}/{len(all_local_images)}] 업로드 중...')
                     fi = page.query_selector('input[type="file"]')
                     if not fi:
                         page.evaluate('''() => { const btn = document.querySelector('button.se-image-toolbar-button'); if (btn) btn.click(); }''')
@@ -467,7 +538,7 @@ def publish_info_article(topic=None):
                         fi = page.query_selector('input[type="file"]')
                     if fi:
                         fi.set_input_files(img_path)
-                        time.sleep(10 if idx < len(local_images) - 1 else 20)
+                        time.sleep(10 if idx < len(all_local_images) - 1 else 20)
             else:
                 time.sleep(3)
 
@@ -481,10 +552,10 @@ def publish_info_article(topic=None):
 
             if not doc_json:
                 log('❌ SE3 문서 없음, 템플릿 사용')
-                doc_json = make_info_article_layout(topic, len(local_images))
+                doc_json = make_info_article_layout(topic, len(all_local_images))
             else:
                 log(f'📄 SE3 문서 추출 완료: {len(doc_json)} chars')
-                doc_json = rebuild_with_layout(doc_json, topic, local_images)
+                doc_json = rebuild_with_layout(doc_json, topic, section_image_map)
 
             # ── REST API 발행 ──
             log('🚀 REST API 발행...')
@@ -524,7 +595,7 @@ def publish_info_article(topic=None):
             if m:
                 article_id = int(m.group(1))
                 log(f'✅✅✅ 정보글 발행 성공! articleId={article_id}')
-                log(f'📌 주제: {keyword} | 🖼️ 이미지: {len(local_images)}장')
+                log(f'📌 주제: {keyword} | 🖼️ 이미지: {len(all_local_images)}장')
             else:
                 log(f'❌ 발행 실패: {resp_text}')
 
