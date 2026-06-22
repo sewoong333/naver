@@ -477,16 +477,82 @@ def load_session_storage():
 
 
 def get_session_age():
-    if not os.path.exists(SESSION_META):
-        return None
-    with open(SESSION_META) as f:
-        meta = json.load(f)
-    return time.time() - meta.get('saved_at', 0)
+    # 1차: meta.json (정확한 저장 시각)
+    if os.path.exists(SESSION_META):
+        with open(SESSION_META) as f:
+            meta = json.load(f)
+        saved_at = meta.get('saved_at')
+        if saved_at:
+            return time.time() - saved_at
+    # 2차: storage file mtime (fallback)
+    if os.path.exists(STORAGE_FILE):
+        return time.time() - os.path.getmtime(STORAGE_FILE)
+    return None
 
 
-def is_session_expired(max_age_hours=48):
+def is_session_expired(max_age_hours=20):
     age = get_session_age()
     return age is None or age > max_age_hours * 3600
+
+
+# ── 세션 자동 갱신 ────────────────────────────────────
+
+def refresh_session():
+    """NID_AUT(자동로그인)으로 NID_SES를 자동 갱신. QR 불필요.
+    nid.naver.com 방문 → NID_AUT 있으면 Naver가 자동으로 새 NID_SES 발급.
+    Returns: True if refresh succeeded, False if NID_AUT도 만료됨.
+    """
+    state = load_session_storage()
+    if not state:
+        log('❌ 저장된 세션 없음.')
+        return False
+
+    has_aut = any(c['name'] == 'NID_AUT' for c in state.get('cookies', []))
+    if not has_aut:
+        log('⚠️ NID_AUT 없음. QR 로그인 필요.')
+        return False
+
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                storage_state=STORAGE_FILE,
+                viewport={'width': 1280, 'height': 900},
+                locale='ko-KR', timezone_id='Asia/Seoul'
+            )
+            page = context.new_page()
+
+            # 네이버 메인 방문 → NID_AUT 있으면 자동으로 NID_SES 갱신됨
+            log('🔄 NID_AUT → NID_SES 갱신 시도...')
+            page.goto('https://www.naver.com/',
+                      wait_until='networkidle', timeout=30000)
+            page.wait_for_timeout(3000)
+
+            # 네이버 메인에서 로그인 상태 확인 (gnb_login_button 유무)
+            login_btn = page.query_selector('#gnb_login_button')
+            refresh_ok = login_btn is None
+
+            if refresh_ok:
+                # 새 storage_state 저장 (갱신된 NID_SES 포함)
+                new_state = context.storage_state()
+                with open(STORAGE_FILE, 'w') as f:
+                    json.dump(new_state, f, ensure_ascii=False)
+                meta = {'saved_at': time.time(), 'date': datetime.now().isoformat(),
+                        'cookie_count': len(new_state.get('cookies', [])),
+                        'auto_refreshed': True}
+                with open(SESSION_META, 'w') as f:
+                    json.dump(meta, f, ensure_ascii=False)
+                log('✅ 세션 자동 갱신 완료 (NID_AUT → 새 NID_SES)')
+            else:
+                log('❌ NID_AUT 만료됨. QR 로그인 필요.')
+
+            browser.close()
+            return refresh_ok
+
+    except Exception as e:
+        log(f'⚠️ 세션 갱신 실패: {e}')
+        return False
 
 
 # ── QR 로그인 ──────────────────────────────────────────
@@ -541,28 +607,65 @@ def check_session():
         return False
 
     try:
-        import requests as req
-        s = req.Session()
-        for c in state.get('cookies', []):
-            s.cookies.set(c['name'], c['value'],
-                          domain=c.get('domain', '.naver.com'),
-                          path=c.get('path', '/'))
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        }
-        resp = s.get('https://www.naver.com/', headers=headers, timeout=10, allow_redirects=True)
-        is_logged_in = 'nidlogin' not in resp.url.lower()
+        # ★ Playwright로 실 카페 글쓰기 페이지 접속 확인 (로그인 필수)
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                storage_state=STORAGE_FILE,
+                viewport={'width': 1280, 'height': 900},
+                locale='ko-KR', timezone_id='Asia/Seoul'
+            )
+            page = context.new_page()
+            page.goto(f'https://cafe.naver.com/ca-fe/cafes/{TARGET_CLUB_ID}/articles/write',
+                      wait_until='networkidle', timeout=15000)
+            time.sleep(2)
+            redirected_to_login = 'nidlogin' in page.url.lower()
+            browser.close()
+
         age = get_session_age()
         age_str = f'{age/3600:.1f}시간' if age else '알 수 없음'
-        if is_logged_in:
-            log(f'✅ 세션 정상 (경과: {age_str})')
-        else:
+
+        if redirected_to_login:
             log(f'❌ 세션 만료됨 (경과: {age_str})')
-        return is_logged_in
+            return False
+        else:
+            log(f'✅ 세션 정상 (경과: {age_str})')
+            return True
+
     except Exception as e:
-        log(f'❌ 세션 확인 오류: {e}')
-        return False
+        log(f'⚠️ Playwright 확인 실패, fallback 검증 시도: {e}')
+        # Fallback: requests + Cafe API 직접 호출
+        try:
+            import requests as req
+            s = req.Session()
+            for c in state.get('cookies', []):
+                s.cookies.set(c['name'], c['value'],
+                              domain=c.get('domain', '.naver.com'),
+                              path=c.get('path', '/'))
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+                'Accept': 'application/json',
+                'Referer': f'https://cafe.naver.com/ca-fe/cafes/{TARGET_CLUB_ID}',
+            }
+            # Cafe API로 실제 인증 확인
+            resp = s.get(
+                f'https://apis.cafe.naver.com/cafe-web/cafeinfo/v1.0/cafes/{TARGET_CLUB_ID}',
+                headers=headers, timeout=10
+            )
+            data = resp.json()
+            is_valid = data.get('message') != 'unauthorized' and 'cafe' in data
+
+            age = get_session_age()
+            age_str = f'{age/3600:.1f}시간' if age else '알 수 없음'
+            if is_valid:
+                log(f'✅ 세션 정상 (경과: {age_str})')
+            else:
+                log(f'❌ 세션 만료됨 (경과: {age_str})')
+            return is_valid
+        except Exception as e2:
+            log(f'❌ 세션 확인 완전 실패: {e2}')
+            return False
 
 
 # ── REST API 발행 ──────────────────────────────────────
@@ -797,9 +900,11 @@ def generate_daily_articles():
 # ── CLI ────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description='Naver Session Manager v2.1')
-    parser.add_argument('--login', action='store_true', help='QR 로그인 (최초 1회)')
-    parser.add_argument('--check', action='store_true', help='세션 상태 확인')
+    parser = argparse.ArgumentParser(description='Naver Session Manager v2.2')
+    parser.add_argument('--login', action='store_true', help='QR 로그인 (60일 주기 1회)')
+    parser.add_argument('--check', action='store_true', help='세션 상태 확인 + 필요시 자동 갱신')
+    parser.add_argument('--refresh', action='store_true', help='NID_AUT로 NID_SES 자동 갱신 (QR 불필요)')
+    parser.add_argument('--keepalive', action='store_true', help='세션 유지용 keepalive (12h 크론용)')
     parser.add_argument('--post', action='store_true', help='테스트 게시글 1개 발행')
     parser.add_argument('--post-daily', action='store_true', help='일일 게시글 발행 (3-4개)')
     parser.add_argument('--title', help='게시글 제목')
@@ -812,6 +917,9 @@ def main():
         return
 
     if args.check:
+        # 1. 먼저 자동 갱신 시도 (NID_AUT 있으면 NID_SES 갱신됨)
+        refresh_session()
+        # 2. 갱신 후 확인
         valid = check_session()
         if valid:
             age = get_session_age()
@@ -819,16 +927,33 @@ def main():
             print(f'\n✅ 세션 정상')
             print(f'   저장 위치: {STORAGE_FILE}')
             print(f'   경과: {age_h:.1f}시간')
-            print(f'   만료 예정: 약 {max(0, 48 - age_h):.1f}시간 후')
+            print(f'   만료 예정: 약 {max(0, 20 - age_h):.1f}시간 후')
         else:
             print(f'\n❌ 세션 만료')
             print(f'   → python naver_session_manager.py --login')
+        return
+
+    if args.refresh:
+        ok = refresh_session()
+        print(f'\n{"✅ 자동 갱신 성공" if ok else "❌ 자동 갱신 실패 (QR 로그인 필요)"}')
+        return
+
+    if args.keepalive:
+        # 12시간마다 실행하는 keepalive 크론용
+        ok = refresh_session()
+        if ok:
+            age = get_session_age()
+            age_h = age / 3600 if age else 0
+            print(f'\n✅ Keepalive 성공 (세션 {age_h:.1f}시간 경과)')
+        else:
+            print(f'\n❌ Keepalive 실패 — NID_AUT 만료. QR 로그인 필요.')
         return
 
     if args.post:
         if not args.title or not args.body:
             log('❌ --title 과 --body 필요')
             return
+        refresh_session()  # 자동 갱신 먼저 시도
         valid = check_session()
         if not valid:
             log('⚠️ 세션 만료')
@@ -841,6 +966,7 @@ def main():
         return
 
     if args.post_daily:
+        refresh_session()  # 자동 갱신 먼저 시도
         valid = check_session()
         if not valid:
             log('❌ 세션 만료. --login 필요')
