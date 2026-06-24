@@ -758,167 +758,398 @@ def post_article(title, body_html, board_key='used'):
 
 # ── 게시글 생성 ────────────────────────────────────────
 
-def generate_daily_articles():
+DB_PATH = os.path.join(BASE_DIR, 'cafe_articles.db')
+
+
+def _remove_emoji(text):
+    """이모지 및 특수문자 제거 (Korean/CJK 문자는 보존)"""
+    # Emoji 블록: Supplementary Symbols, Dingbats 등 (Hangul/CJK와 겹치지 않는 범위)
+    emoji_ranges = (
+        "\U0001F300-\U0001F6FF"  # Misc Symbols + Emoticons + Transport
+        "\U0001F900-\U0001F9FF"  # Supplemental Symbols
+        "\U0001FA00-\U0001FA6F"  # Chess Symbols
+        "\U0001FA70-\U0001FAFF"  # Symbols Extended-A
+        "\U00002702-\U000027B0"  # Dingbats
+        "\U0000FE00-\U0000FE0F"  # Variation Selectors
+    )
+    text = re.sub(f'[{emoji_ranges}]', '', text, flags=re.UNICODE)
+    # Zero Width Joiner
+    text = re.sub('\U0000200D', '', text)
+    # 흔히 쓰는 특수 이모지 문자들 (non-raw string으로 Unicode escape 처리)
+    text = re.sub('[\u2600-\u27BF\u2B50\u2934\u2935\u25AA\u25AB\u25B6\u25C0\u25FB-\u25FE\u3030\u303D\u3297\u3299]', '', text)
+    # 개별 특수문자 제거
+    text = re.sub(r'[⭐✅♻️🔄⏳🛒]', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+
+def _optimize_title(title, max_chars=15):
     """
-    일일 게시글 생성 (3-4개)
-    - 메인: 중고악기거래 게시판 (used) — 2-3개
-    - 보조: 꿀팁 게시판 (tip) — 1개
+    제목 15자 이내 최적화
+    1. 이모지 제거
+    2. "악기명 + 상태/가격" 형식
+    3. 15자 초과 시 의미 단위로 절삭
     """
+    # 1. 이모지 제거
+    title = _remove_emoji(title)
+
+    # 2. 공백 정리
+    title = re.sub(r'\s+', ' ', title).strip()
+
+    # 3. 불필요한 접두사/접미사 제거
+    title = re.sub(r'^[\[\(]\s*(구매|판매|정보|팁|할인|특가|급처)\s*[\]\)]\s*', '', title)
+    title = re.sub(r'\s*[-–—]+\s*', ' ', title)  # dash-like separators
+    title = re.sub(r'\s*[\[\(].*?[\]\)]\s*$', '', title)  # trailing brackets
+    title = title.strip()
+
+    # 4. 15자 이내로 절삭 (한글 기준)
+    if len(title) <= max_chars:
+        return title
+
+    # 의미 단위로 자르기: , . / 공백 기준 앞부분 우선
+    # 쉼표/공백 기준으로 앞부분만 취하고 15자 이내가 되는 최대 조각 찾기
+    candidates = []
+    for sep in [',', '。', '/', ' ', '·']:
+        if sep in title:
+            parts = title.split(sep)
+            acc = ''
+            for p in parts:
+                test = (acc + sep + p).strip().strip(sep).strip()
+                if len(test) <= max_chars:
+                    acc = test
+                else:
+                    break
+            if acc and len(acc) <= max_chars and len(acc) > len(candidates):
+                candidates = acc
+
+    if candidates and len(candidates) <= max_chars:
+        return candidates
+
+    # 마지막 수단: 앞에서 15자
+    return title[:max_chars].rstrip(' ,.-–—')
+
+
+def _fetch_db_articles(count=3):
+    """
+    DB에서 status='collected' 데이터를 가져옴
+    Returns: list of dicts with title, body, board, db_id
+    """
+    try:
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+
+        cur.execute(
+            "SELECT id, title, summary, image_url, image_urls, category "
+            "FROM articles WHERE status='collected' "
+            "ORDER BY RANDOM() LIMIT ?",
+            (count,)
+        )
+        rows = cur.fetchall()
+        conn.close()
+
+        articles = []
+        for r in rows:
+            d = dict(r)
+            # 제목 최적화
+            opt_title = _optimize_title(d.get('title', '') or '')
+
+            # 본문 구성
+            summary = (d.get('summary') or '').strip()
+            body = _build_body_from_db(summary, d.get('image_url', ''), d.get('image_urls', ''))
+
+            # 게시판 분류 (카테고리 기반)
+            cat = (d.get('category') or '').strip()
+            if cat in ('팁', '정보', 'tip', 'info'):
+                board = 'tip'
+            else:
+                board = 'used'
+
+            articles.append({
+                'title': opt_title,
+                'body': body,
+                'board': board,
+                'db_id': d['id'],
+            })
+
+        return articles
+
+    except Exception as e:
+        log(f'⚠️ DB 조회 오류: {e}')
+        return []
+
+
+def _build_body_from_db(summary, image_url, image_urls_json):
+    """
+    DB 데이터 기반 본문 HTML 생성
+    - summary를 본문에 사용
+    - image_urls가 있으면 하단에 이미지 링크 추가
+    """
+    # 요약 정리: 여러 줄 텍스트를 <p>로 변환
+    if summary:
+        lines = summary.strip().split('\n')
+        body_parts = []
+        for line in lines:
+            line = line.strip()
+            if line:
+                body_parts.append(f'<p>{line}</p>')
+        body_html = ''.join(body_parts)
+    else:
+        body_html = '<p>상품 설명이 없습니다. 문의주세요.</p>'
+
+    body_html += '<p><br></p>'
+
+    # 가격 정보 (summary에 가격이 이미 포함되어 있을 수 있음)
+    body_html += '<p><b>💰 가격: 문의 주세요</b></p>'
+    body_html += '<p><br></p>'
+
+    # 이미지 URL 처리
+    image_urls = []
+    # image_urls JSON 배열
+    if image_urls_json and image_urls_json not in ('[]', '', 'null'):
+        try:
+            parsed = json.loads(image_urls_json)
+            if isinstance(parsed, list):
+                image_urls.extend(parsed)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # 단일 image_url (중복 방지)
+    if image_url and image_url not in image_urls:
+        image_urls.insert(0, image_url)
+
+    # 중복 제거
+    seen = set()
+    unique_urls = []
+    for u in image_urls:
+        u_stripped = u.strip()
+        if u_stripped and u_stripped not in seen:
+            seen.add(u_stripped)
+            unique_urls.append(u_stripped)
+
+    if unique_urls:
+        body_html += '<p>📷 <b>상품 이미지</b></p>'
+        for idx, url in enumerate(unique_urls[:10], 1):
+            body_html += f'<p><a href="{url}">📷 이미지 {idx} 보기</a></p>'
+        body_html += '<p><br></p>'
+
+    body_html += '<p>---</p>'
+    body_html += '<p>본 상품은 에코뮤직 중고악기백화점 매물입니다.</p>'
+    body_html += '<p>문의는 댓글 또는 쪽지로 남겨주세요.</p>'
+
+    return body_html
+
+
+def _make_dummy_article(article_type='sell', used_instr=None, used_brand=None):
+    """
+    DB 데이터 부족 시 사용할 개선된 더미 게시글 생성
+    - 15자 제목 규칙 적용
+    - 이모지 최소화
+    - 진정성 있는 본문
+    """
+    if not used_instr:
+        used_instr = random.choice(INSTRUMENTS)
+    instr_name = used_instr[0]
+    instr_en = used_instr[1]
+
+    if not used_brand:
+        brands_short = list(set(b.split('(')[0] for b in BRANDS))
+        used_brand = random.choice(brands_short)
+
+    if article_type == 'sell':
+        title_raw = f"{used_brand} {instr_name} 판매"
+        title = _optimize_title(title_raw)
+        body = (
+            f"<p>{used_brand} {instr_name} 판매합니다.</p>"
+            f"<p><br></p>"
+            f"<p><b>상품 정보</b></p>"
+            f"<p>• 브랜드: {used_brand}</p>"
+            f"<p>• 모델: {instr_name}</p>"
+            f"<p>• 상태: 전체적으로 깨끗하며 사용감 적음</p>"
+            f"<p>• 구성품: 본체 + 케이스 + 액세서리</p>"
+            f"<p><br></p>"
+            f"<p><b>거래 정보</b></p>"
+            f"<p>• 가격: 협의 가능 (문의주세요)</p>"
+            f"<p>• 거래 방식: 직거래 / 택배</p>"
+            f"<p>• 위치: 경기도 (에코뮤직 매장)</p>"
+            f"<p><br></p>"
+            f"<p>관심 있으신 분은 댓글 또는 쪽지 부탁드립니다.</p>"
+            f"<p><br></p>"
+            f"<p>#에코뮤직 #중고악기 #{instr_name} #{used_brand} #악기판매 #중고거래</p>"
+        )
+        return {'title': title, 'body': body, 'board': 'used'}
+
+    elif article_type == 'buy':
+        title_raw = f"{instr_name} 구합니다"
+        title = _optimize_title(title_raw)
+        body = (
+            f"<p>{instr_name} 구매 원합니다.</p>"
+            f"<p><br></p>"
+            f"<p><b>찾는 악기</b></p>"
+            f"<p>• 종류: {instr_name}</p>"
+            f"<p>• 예산: 협의 가능</p>"
+            f"<p>• 상태: 연습용 가능 / 연주용 선호</p>"
+            f"<p><br></p>"
+            f"<p>쪽지나 댓글 주시면 감사하겠습니다.</p>"
+            f"<p><br></p>"
+            f"<p>#중고악기 #{instr_name} #악기구매 #에코뮤직 #직거래</p>"
+        )
+        return {'title': title, 'body': body, 'board': 'used'}
+
+    elif article_type == 'bargain':
+        price = random.choice(['급처', '특가'])
+        title_raw = f"{instr_name} {price}"
+        title = _optimize_title(title_raw)
+        body = (
+            f"<p>{used_brand} {instr_name} {price} 판매합니다.</p>"
+            f"<p><br></p>"
+            f"<p>상태 좋고 사용감 거의 없습니다.</p>"
+            f"<p>가격도 합리적으로 책정했으니 관심 있으신 분 연락주세요.</p>"
+            f"<p><br></p>"
+            f"<p>• 브랜드: {used_brand}</p>"
+            f"<p>• 모델: {instr_name}</p>"
+            f"<p><br></p>"
+            f"<p>#중고악기 #{instr_name} #{used_brand} #악기판매 #에코뮤직 #할인</p>"
+        )
+        return {'title': title, 'body': body, 'board': 'used'}
+
+    return None
+
+
+def _make_dummy_tip():
+    """꿀팁 게시글 생성 (tip 게시판용, 15자 제목)"""
     today = date.today()
-    weekday_list = ['월', '화', '수', '목', '금', '토', '일']
-    weekday = weekday_list[today.weekday()]
-    
-    # 랜덤 악기 선택
-    instr = random.choice(INSTRUMENTS)
-    brand = random.choice(BRANDS)
-    brands_short = list(set(b.split('(')[0] for b in BRANDS))
-    brand_s = random.choice(brands_short)
-    
-    # 악기 거래 게시글 (used 게시판) — 2-3개
-    articles = []
-    
-    # ── 1. 악기 판매 정보글 ──
-    a1_title = f"🎵 [{today.month}/{today.day}] {brand} {instr[0]} 판매 — 상태 좋습니다 ✨"
-    a1_body = (
-        f"<p>안녕하세요! 에코뮤직 중고악기백화점입니다 🙌</p>"
-        f"<p><br></p>"
-        f"<p>오늘 소개해드릴 악기는 <b>{brand} {instr[0]}</b>입니다.</p>"
-        f"<p><br></p>"
-        f"<p>📌 <b>상품 정보</b></p>"
-        f"<p>• 브랜드: {brand}</p>"
-        f"<p>• 모델: {instr[0]} (중고)</p>"
-        f"<p>• 상태: 전체적으로 깨끗하며 사용감 적음</p>"
-        f"<p>• 구성품: 본체 + 케이스 + 액세서리</p>"
-        f"<p><br></p>"
-        f"<p>📌 <b>거래 정보</b></p>"
-        f"<p>• 가격: 협의 가능 (문의주세요)</p>"
-        f"<p>• 거래 방식: 직거래 / 택배</p>"
-        f"<p>• 위치: 경기도 (에코뮤직 매장)</p>"
-        f"<p>• 연락: 쪽지 또는 댓글 남겨주세요</p>"
-        f"<p><br></p>"
-        f"<p>📌 <b>상세 설명</b></p>"
-        f"<p>작년에 구매하여 연습용으로 사용하던 악기입니다.</p>"
-        f"<p>업그레이드로 인해 내놓게 되었네요ㅎㅎ</p>"
-        f"<p>음색도 좋고 상태도 나쁘지 않으니 관심 있으신 분은 연락주세요!</p>"
-        f"<p><br></p>"
-        f"<p>📍 매장 방문도 가능합니다. 직접 보고 구매하세요!</p>"
-        f"<p><br></p>"
-        f"<p>#에코뮤직 #중고악기 #{instr[0]} #{brand.replace(' ','')} #악기판매 #중고거래 #경기도악기 #{' #'.join(brands_short[:3])}</p>"
-    )
-    articles.append({'title': a1_title, 'body': a1_body, 'board': 'used'})
-    
-    # ── 2. 중고악기 구매/교환 글 ──
-    a2_title = f"🔍 [구매] {instr[0]} 구합니다 — 예산 협의 가능 💬"
-    a2_body = (
-        f"<p>안녕하세요! {instr[0]} 구매 원합니다 🙋</p>"
-        f"<p><br></p>"
-        f"<p>🎯 <b>찾는 악기</b></p>"
-        f"<p>• 종류: {instr[0]}</p>"
-        f"<p>• 예산: 협의 가능</p>"
-        f"<p>• 선호 브랜드: {brand_s} 외 전체</p>"
-        f"<p>• 상태: 연습용 가능 / 연주용 선호</p>"
-        f"<p><br></p>"
-        f"<p>💡 <b>조건</b></p>"
-        f"<p>• 합리적인 가격에 거래해주실 분</p>"
-        f"<p>• 직거래 가능하면 더 좋습니다</p>"
-        f"<p>• 사진 미리 보내주시면 감사하겠습니다</p>"
-        f"<p><br></p>"
-        f"<p>쪽지나 댓글 주시면 빠르게 연락드릴게요! 😊</p>"
-        f"<p><br></p>"
-        f"<p>#중고악기 #{instr[0]} #악기구매 #에코뮤직 #중고악기백화점 #직거래 #악기거래</p>"
-    )
-    articles.append({'title': a2_title, 'body': a2_body, 'board': 'used'})
-    
-    # ── 3. 꿀팁/정보 (tip 게시판) ──
-    tips = [
+    tips_pool = [
         {
-            'title': f"💡 중고악기 구매 시 꼭 확인해야 할 5가지 — {today.month}월 업데이트",
+            'title_raw': '중고악기 구매 체크리스트',
             'body': (
-                f"<p>🎯 중고악기, 처음 사시는 분들 많죠? 오늘은 꿀팁 대방출합니다!</p>"
-                f"<p><br></p>"
-                f"<p>✅ <b>1. 상태 확인은 직접!</b></p>"
-                f"<p>사진만 보고 판단하지 마세요. 특히 현의 상태, 프렛 마모, 음정 안정성은 직접 봐야 합니다.</p>"
-                f"<p><br></p>"
-                f"<p>✅ <b>2. 일련번호 체크</b></p>"
-                f"<p>브랜드 정품 확인은 필수! 일련번호로 제조년도와 정품 여부를 확인하세요.</p>"
-                f"<p><br></p>"
-                f"<p>✅ <b>3. 수리 이력 확인</b></p>"
-                f"<p>\"수리한 적 없음\" vs \"전문가 수리 완료\"는 완전히 다릅니다. 꼭 물어보세요.</p>"
-                f"<p><br></p>"
-                f"<p>✅ <b>4. 계절별 관리법</b></p>"
-                f"<p>{today.month}월에는 습도 관리가 중요! 케이스 안에 습도조절제 필수입니다.</p>"
-                f"<p><br></p>"
-                f"<p>✅ <b>5. 가격 비교</b></p>"
-                f"<p>같은 모델도 상태에 따라 천차만별. 에코뮤직에서 직접 비교해보세요!</p>"
-                f"<p><br></p>"
-                f"<p>📌 이 팁들이 도움되셨다면 공감/댓글 부탁드려요~ 😊</p>"
-                f"<p><br></p>"
-                f"<p>#중고악기 #악기구매팁 #악기관리 #에코뮤직 #중고악기백화점 #{instr[0]} #악기정보 #음악꿀팁</p>"
+                f'<p>중고악기 구매 시 꼭 확인할 사항을 정리했습니다.</p>'
+                f'<p><br></p>'
+                f'<p>1. 외관 상태 확인 (균열, 들뜸, 마모)</p>'
+                f'<p>2. 음정 안정성 테스트</p>'
+                f'<p>3. 일련번호로 정품 확인</p>'
+                f'<p>4. 수리 이력 확인</p>'
+                f'<p>5. 유사 모델 가격 비교</p>'
+                f'<p><br></p>'
+                f'<p>에코뮤직 중고악기백화점에서 직접 보고 구매하세요.</p>'
+                f'<p><br></p>'
+                f'<p>#중고악기 #악기구매팁 #에코뮤직 #중고악기백화점 #악기정보</p>'
             ),
-            'board': 'tip'
         },
         {
-            'title': f"🎻 {instr[0]} 관리법 — 초보자도 쉽게 따라하는 가이드",
+            'title_raw': '악기 보관 및 관리 요령',
             'body': (
-                f"<p>안녕하세요! 에코뮤직입니다 🎶</p>"
-                f"<p><br></p>"
-                f"<p>오늘은 <b>{instr[0]}</b> 관리 꿀팁을 알려드릴게요.</p>"
-                f"<p><br></p>"
-                f"<p>🌟 <b>기본 관리 수칙</b></p>"
-                f"<p>1️⃣ 연주 후 항상 부드러운 천으로 닦아주세요 (땀과 먼지 제거)</p>"
-                f"<p>2️⃣ 사용 후에는 반드시 케이스에 보관하세요</p>"
-                f"<p>3️⃣ 직사광선과 온도 변화가 심한 곳은 피해주세요</p>"
-                f"<p>4️⃣ 6개월에 한 번 정도는 전문가 점검을 받으세요</p>"
-                f"<p><br></p>"
-                f"<p>💧 <b>습도 관리 (필수!)</b></p>"
-                f"<p>악기는 적정 습도(40-60%) 유지가 가장 중요합니다.</p>"
-                f"<p>특히 여름 장마철과 겨울 건조한 시기에 주의하세요!</p>"
-                f"<p><br></p>"
-                f"<p>✏️ <b>주의할 점</b></p>"
-                f"<p>• 줄(현)은 3-6개월 주기로 교체 권장</p>"
-                f"<p>• 튜닝은 연주 전후로 천천히</p>"
-                f"<p>• 균열이나 들뜸 발견 시 즉시 수리</p>"
-                f"<p><br></p>"
-                f"<p>매장에 방문하시면 더 자세한 상담도 가능합니다! 😊</p>"
-                f"<p><br></p>"
-                f"<p>#{instr[0]} #악기관리 #악기관리법 #에코뮤직 #중고악기백화점 #음악꿀팁 #악기튜닝 #악기보관</p>"
+                f'<p>악기 오래 쓰는 관리법을 소개합니다.</p>'
+                f'<p><br></p>'
+                f'<p>• 연주 후 부드러운 천으로 닦기</p>'
+                f'<p>• 사용 후 케이스 보관 필수</p>'
+                f'<p>• 직사광선 피하고 적정 습도 유지 (40-60%)</p>'
+                f'<p>• 현은 3-6개월 주기 교체</p>'
+                f'<p>• 6개월에 한 번 전문가 점검</p>'
+                f'<p><br></p>'
+                f'<p>#악기관리 #악기보관 #에코뮤직 #중고악기백화점 #음악꿀팁</p>'
             ),
-            'board': 'tip'
-        }
+        },
+        {
+            'title_raw': f'{today.month}월 악기 시세 동향',
+            'body': (
+                f'<p>{today.month}월 중고악기 시세 동향을 알려드립니다.</p>'
+                f'<p><br></p>'
+                f'<p>최근 에코뮤직 매장 기준 인기 악기와 가격대를 정리했습니다.</p>'
+                f'<p>방문 전 미리 전화 주시면 원하시는 악기 준비해드립니다.</p>'
+                f'<p><br></p>'
+                f'<p>#중고악기 #악기시세 #에코뮤직 #중고악기백화점 #{today.month}월시세</p>'
+            ),
+        },
+        {
+            'title_raw': '초보자 악기 선택 가이드',
+            'body': (
+                f'<p>악기 처음 시작하는 분들을 위한 선택 가이드입니다.</p>'
+                f'<p><br></p>'
+                f'<p>1. 예산 설정 (중고 10-50만원)</p>'
+                f'<p>2. 배우고 싶은 악기 결정</p>'
+                f'<p>3. 상태 좋은 중고 악기 추천</p>'
+                f'<p>4. 매장 방문해서 직접 연주해보기</p>'
+                f'<p>5. AS 가능 여부 확인</p>'
+                f'<p><br></p>'
+                f'<p>에코뮤직에서는 초보자 맞춤 상담도 가능합니다.</p>'
+                f'<p><br></p>'
+                f'<p>#초보자악기 #악기선택 #중고악기 #에코뮤직 #악기추천</p>'
+            ),
+        },
     ]
-    
-    # 랜덤으로 꿀팁 1개 선택
-    articles.append(random.choice(tips))
-    
-    # ── 4. 추가 거래글 (3-4개 맞추기) ──
-    if random.random() < 0.7:  # 70% 확률로 4번째 글 추가
-        instr2 = random.choice(INSTRUMENTS)
-        while instr2 == instr:
-            instr2 = random.choice(INSTRUMENTS)
-        a4_title = f"⚡ {random.choice(['급처','할인','특가'])}! {instr2[0]} 상태 미사용급 판매합니다"
-        a4_body = (
-            f"<p>안녕하세요! 🙋</p>"
-            f"<p><br></p>"
-            f"<p><b>{instr2[0]}</b> 판매합니다!</p>"
-            f"<p>거의 사용하지 않아 상태 아주 좋아요.</p>"
-            f"<p><br></p>"
-            f"<p>📌 <b>상세 정보</b></p>"
-            f"<p>• 브랜드: {random.choice(BRANDS)}</p>"
-            f"<p>• 상태: 사용감 거의 없음 (미사용급)</p>"
-            f"<p>• 구매시기: {random.randint(2022, 2024)}년</p>"
-            f"<p>• 구성: 본체 + 기본 구성품</p>"
-            f"<p><br></p>"
-            f"<p>💰 가격: 협의 가능 (쪽지 주세요)</p>"
-            f"<p>📍 직거래: 경기도 (에코뮤직)</p>"
-            f"<p>📦 택배: 선불/착불 협의</p>"
-            f"<p><br></p>"
-            f"<p>관심 있으신 분은 편하게 연락주세요! 😊</p>"
-            f"<p><br></p>"
-            f"<p>#중고악기 #{instr2[0]} #악기판매 #에코뮤직 #중고악기백화점 #직거래 #할인판매 #경기도악기</p>"
-        )
-        articles.append({'title': a4_title, 'body': a4_body, 'board': 'used'})
-    
-    return articles
+    choice = random.choice(tips_pool)
+    return {
+        'title': _optimize_title(choice['title_raw']),
+        'body': choice['body'],
+        'board': 'tip',
+    }
+
+
+def generate_daily_articles():
+    """
+    일일 게시글 생성 (3-4개) - DB 기반
+    - 메인: 중고악기거래 게시판 (used) — 2-3개 (DB 우선, 부족 시 더미 폴백)
+    - 보조: 꿀팁 게시판 (tip) — 1개
+    - 제목 15자 이내 최적화
+    - 이미지 링크 포함
+    """
+    articles = []
+
+    # ── Phase 1: DB에서 collected 데이터 가져오기 ──
+    db_articles = _fetch_db_articles(count=3)
+
+    # ── Phase 2: DB 기사 사용 후 status 업데이트 ──
+    if db_articles:
+        db_ids = [a['db_id'] for a in db_articles]
+        try:
+            import sqlite3
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            now_iso = datetime.now().isoformat()
+            for db_id in db_ids:
+                cur.execute(
+                    "UPDATE articles SET status='posted', posted_at=? WHERE id=? AND status='collected'",
+                    (now_iso, db_id)
+                )
+            conn.commit()
+            conn.close()
+            log(f'✅ DB 기사 {len(db_ids)}개 status=posted 업데이트 완료')
+        except Exception as e:
+            log(f'⚠️ DB status 업데이트 실패: {e}')
+
+        for art in db_articles:
+            # db_id 필드는 내부용, post_article에 전달하지 않음
+            articles.append({
+                'title': art['title'],
+                'body': art['body'],
+                'board': art['board'],
+            })
+
+    # ── Phase 3: 부족분을 개선된 더미로 채움 ──
+    used_count = sum(1 for a in articles if a['board'] == 'used')
+    tip_count = sum(1 for a in articles if a['board'] == 'tip')
+
+    # used 게시글: 최소 2개, 최대 3개
+    while used_count < 2:
+        instr = random.choice(INSTRUMENTS)
+        brands_short = list(set(b.split('(')[0] for b in BRANDS))
+        brand = random.choice(brands_short)
+        art_type = random.choice(['sell', 'buy', 'bargain'])
+        dummy = _make_dummy_article(article_type=art_type, used_instr=instr, used_brand=brand)
+        if dummy:
+            articles.append(dummy)
+            used_count += 1
+
+    # 꿀팁 게시글: 1개
+    if tip_count < 1:
+        articles.append(_make_dummy_tip())
+
+    # 섞기 (같은 게시판 연속 방지)
+    random.shuffle(articles)
+
+    return articles[:4]  # 최대 4개
 
 
 # ── CLI ────────────────────────────────────────────────
