@@ -498,18 +498,18 @@ def is_session_expired(max_age_hours=20):
 # ── 세션 자동 갱신 ────────────────────────────────────
 
 def refresh_session():
-    """NID_AUT(자동로그인)으로 NID_SES를 자동 갱신. QR 불필요.
-    nid.naver.com 방문 → NID_AUT 있으면 Naver가 자동으로 새 NID_SES 발급.
-    Returns: True if refresh succeeded, False if NID_AUT도 만료됨.
+    """NID_SES activity 기반 세션 갱신. QR 불필요.
+    네이버 메인 방문 → 기존 NID_SES로 로그인 상태 유지 + storage 갱신
+    Returns: True if refresh succeeded, False if NID_SES도 만료됨.
     """
     state = load_session_storage()
     if not state:
         log('❌ 저장된 세션 없음.')
         return False
 
-    has_aut = any(c['name'] == 'NID_AUT' for c in state.get('cookies', []))
-    if not has_aut:
-        log('⚠️ NID_AUT 없음. QR 로그인 필요.')
+    has_ses = any(c['name'] == 'NID_SES' for c in state.get('cookies', []))
+    if not has_ses:
+        log('⚠️ NID_SES 없음. QR 로그인 필요.')
         return False
 
     try:
@@ -523,29 +523,37 @@ def refresh_session():
             )
             page = context.new_page()
 
-            # 네이버 메인 방문 → NID_AUT 있으면 자동으로 NID_SES 갱신됨
-            log('🔄 NID_AUT → NID_SES 갱신 시도...')
+            # 네이버 메인 방문 → NID_SES가 유효하면 로그인 상태 유지
+            log('🔄 NID_SES 상태 확인 + activity 갱신...')
             page.goto('https://www.naver.com/',
                       wait_until='networkidle', timeout=30000)
             page.wait_for_timeout(3000)
 
-            # 네이버 메인에서 로그인 상태 확인 (gnb_login_button 유무)
+            # 로그인 상태 확인 (gnb_login_button 유무)
             login_btn = page.query_selector('#gnb_login_button')
             refresh_ok = login_btn is None
 
             if refresh_ok:
                 # 새 storage_state 저장 (갱신된 NID_SES 포함)
                 new_state = context.storage_state()
-                with open(STORAGE_FILE, 'w') as f:
-                    json.dump(new_state, f, ensure_ascii=False)
-                meta = {'saved_at': time.time(), 'date': datetime.now().isoformat(),
-                        'cookie_count': len(new_state.get('cookies', [])),
-                        'auto_refreshed': True}
-                with open(SESSION_META, 'w') as f:
-                    json.dump(meta, f, ensure_ascii=False)
-                log('✅ 세션 자동 갱신 완료 (NID_AUT → 새 NID_SES)')
+                new_cookies = new_state.get('cookies', [])
+                new_ses = any(c['name'] == 'NID_SES' for c in new_cookies)
+
+                if new_ses:
+                    with open(STORAGE_FILE, 'w') as f:
+                        json.dump(new_state, f, ensure_ascii=False)
+                    meta = {'saved_at': time.time(), 'date': datetime.now().isoformat(),
+                            'cookie_count': len(new_cookies),
+                            'auto_refreshed': True}
+                    with open(SESSION_META, 'w') as f:
+                        json.dump(meta, f, ensure_ascii=False)
+                    log(f'✅ 세션 갱신 완료 (NID_SES 유지, 쿠키 {len(new_cookies)}개)')
+                else:
+                    # ★ 중요: NID_SES가 없으면 기존 storage 보존 (덮어쓰지 않음)
+                    log('❌ 갱신 후 NID_SES 없음 — 기존 storage 보존')
+                    refresh_ok = False
             else:
-                log('❌ NID_AUT 만료됨. QR 로그인 필요.')
+                log('❌ 로그인 상태 아님. QR 로그인 필요.')
 
             browser.close()
             return refresh_ok
@@ -570,7 +578,7 @@ def qr_login():
         context = browser.new_context(viewport={'width':1280,'height':900},
                                        locale='ko-KR', timezone_id='Asia/Seoul')
         page = context.new_page()
-        page.goto('https://nid.naver.com/nidlogin.login', wait_until='networkidle')
+        page.goto('https://nid.naver.com/nidlogin.login', wait_until='domcontentloaded', timeout=20000)
         page.wait_for_timeout(2000)
         qr_btn = page.query_selector('a:has-text("QR")')
         if qr_btn:
@@ -593,9 +601,25 @@ def qr_login():
             browser.close()
             sys.exit(1)
         log('✅ QR 로그인 성공!')
+        # ★ 개선: 로그인 후 네이버 메인 방문 → NID_SES 확정 후 저장
+        page.goto('https://www.naver.com/', wait_until='networkidle', timeout=30000)
+        page.wait_for_timeout(3000)
         save_session_storage(context)
+        # ★ 저장 후 NID_SES 존재 확인
+        saved = load_session_storage()
+        saved_ses = any(c['name'] == 'NID_SES' for c in saved.get('cookies', [])) if saved else False
+        if not saved_ses:
+            log('⚠️ NID_SES 미확인 — 재시도 (추가 대기)')
+            page.wait_for_timeout(5000)
+            save_session_storage(context)
+            saved = load_session_storage()
+            saved_ses = any(c['name'] == 'NID_SES' for c in saved.get('cookies', [])) if saved else False
         browser.close()
-        log(f'✅ 로그인 완료 → {STORAGE_FILE}')
+        if saved_ses:
+            log(f'✅ 로그인 완료 → NID_SES 저장 확인됨: {STORAGE_FILE}')
+        else:
+            log(f'⚠️ 로그인됐지만 NID_SES 미저장 — storage 파일에 NID_SES 없음')
+            sys.exit(1)
 
 
 # ── 세션 유효성 검사 ──────────────────────────────────
@@ -946,7 +970,8 @@ def main():
             age_h = age / 3600 if age else 0
             print(f'\n✅ Keepalive 성공 (세션 {age_h:.1f}시간 경과)')
         else:
-            print(f'\n❌ Keepalive 실패 — NID_AUT 만료. QR 로그인 필요.')
+            print(f'\n❌ Keepalive 실패 — NID_SES 만료. QR 로그인 필요.')
+            sys.exit(1)
         return
 
     if args.post:
